@@ -262,7 +262,7 @@ def enlace_reporte(id_encuesta):
 def pagina_encuesta(id_txt):
     e = buscar_encuesta(id_txt)
     if e is None:
-        encabezado("Oportunidad de formación", TITULO)
+        encabezado("Oportunidad de Formación", TITULO)
         st.error("Esta encuesta no existe. Verifica el enlace.")
         return
     tipo = e["tipo"]
@@ -300,7 +300,7 @@ def pagina_encuesta(id_txt):
                 f"¿Cómo fue el desempeño {texto_facilitador(f)}? *",
                 ESCALA, index=None, key=f"fac_{i}",
             )
-        p_admin = st.radio("¿Cómo fue el desempeño del Administrador? *", ESCALA, index=None)
+        p_admin = st.radio("¿Cómo fue el desempeño del Administrador(a)? *", ESCALA, index=None)
         p_ambiente = st.radio(
             f"¿Cómo le pareció el ambiente que predominó en el {tipo}? *", ESCALA, index=None
         )
@@ -549,10 +549,10 @@ def lista_encuestas():
 
 
 def pagina_admin():
-    encabezado("Oportunidades de formación", "Administración de encuestas")
+    encabezado("Oportunidades de Formación", "Administración de Encuestas")
     if not acceso_admin():
         return
-    t1, t2 = st.tabs(["Encuestas y reportes", "Nueva encuesta"])
+    t1, t2 = st.tabs(["Encuestas y Reportes", "Nueva Encuesta"])
     with t1:
         lista_encuestas()
     with t2:
