@@ -28,7 +28,7 @@ COLUMNAS = {
 # ---------------------------------------------------------------- Google Sheets
 @st.cache_resource
 def abrir_libro():
-            cliente = gspread.service_account_from_dict(json.loads(st.secrets["gcp_json"]))
+    cliente = gspread.service_account_from_dict(json.loads(st.secrets["gcp_json"]))
     return cliente.open_by_key(st.secrets["sheet_id"])
 
 
