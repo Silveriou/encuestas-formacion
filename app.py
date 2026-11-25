@@ -1,16 +1,23 @@
+import base64
 import hmac
+import html
 import json
 from datetime import datetime
 from io import BytesIO
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import gspread
 import pandas as pd
 import streamlit as st
+from openpyxl.styles import Font, PatternFill
+
+CARPETA = Path(__file__).parent
+ICONO = CARPETA / "icono.png"
 
 st.set_page_config(
     page_title="Evaluación de la Oportunidad de Formación",
-    page_icon="📝",
+    page_icon=str(ICONO) if ICONO.exists() else "📝",
     layout="centered",
 )
 
@@ -23,6 +30,73 @@ COLUMNAS = {
     "respuestas": ["id_encuesta", "fecha_hora", "nombre", "impacto", "director",
                    "facilitadores", "administrador", "ambiente", "comentario"],
 }
+
+CSS = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@500;700;800&display=swap');
+#MainMenu, footer {visibility: hidden;}
+.block-container {max-width: 760px; padding-top: 2.5rem;}
+h1, h2, h3 {font-family: 'Montserrat', sans-serif; color: #622599;}
+.cabecera {background: #fff; border-radius: 18px; overflow: hidden; border: 1px solid #E6DCF0;
+  box-shadow: 0 10px 30px rgba(98, 37, 153, .10); margin-bottom: 1.5rem;}
+.cabecera-logo {padding: 1.3rem 1rem .9rem; text-align: center;}
+.cabecera-logo img {max-height: 96px; max-width: 70%;}
+.cabecera-banda {background: linear-gradient(135deg, #622599 0%, #4A1A78 100%); color: #fff;
+  text-align: center; padding: 1.6rem 1.5rem 1.7rem;}
+.cabecera-etiqueta {font-family: 'Montserrat', sans-serif; font-size: .72rem; letter-spacing: .22em;
+  text-transform: uppercase; opacity: .85;}
+.cabecera-titulo {font-family: 'Montserrat', sans-serif; font-weight: 800; font-size: 1.6rem;
+  line-height: 1.2; margin-top: .55rem;}
+.cabecera-linea {width: 56px; height: 3px; background: #fff; opacity: .6; margin: .85rem auto;
+  border-radius: 2px;}
+.cabecera-detalle {font-size: .98rem; opacity: .95; line-height: 1.5;}
+[data-testid="stForm"] {background: #fff; border: 1px solid #E6DCF0; border-radius: 18px;
+  padding: 1.8rem 1.8rem 1.4rem; box-shadow: 0 10px 30px rgba(98, 37, 153, .06);}
+[data-testid="stWidgetLabel"] p {font-weight: 600; color: #2B1B3D;}
+.stButton > button, .stDownloadButton > button, [data-testid="stFormSubmitButton"] > button {
+  border-radius: 999px; font-weight: 700; letter-spacing: .04em; padding: .55rem 1.6rem;}
+.escala {background: #F3ECF9; border-left: 4px solid #622599; border-radius: 8px;
+  padding: .8rem 1rem; margin: .4rem 0 1rem; font-size: .93rem; color: #2B1B3D;}
+.aviso {background: #fff; border: 1px solid #E6DCF0; border-radius: 18px; text-align: center;
+  padding: 2.2rem 1.5rem; box-shadow: 0 10px 30px rgba(98, 37, 153, .06);}
+.aviso-titulo {font-family: 'Montserrat', sans-serif; font-weight: 800; font-size: 1.4rem;
+  color: #622599; margin-bottom: .4rem;}
+</style>
+"""
+
+
+# ---------------------------------------------------------------- Diseño
+@st.cache_data
+def imagen_base64(nombre):
+    ruta = CARPETA / nombre
+    if not ruta.exists():
+        return ""
+    return base64.b64encode(ruta.read_bytes()).decode()
+
+
+def encabezado(etiqueta, titulo, detalle=""):
+    logo = imagen_base64("logo.png")
+    partes = ['<div class="cabecera">']
+    if logo:
+        partes.append(
+            f'<div class="cabecera-logo"><img src="data:image/png;base64,{logo}" alt="Logo"></div>'
+        )
+    partes.append('<div class="cabecera-banda">')
+    partes.append(f'<div class="cabecera-etiqueta">{html.escape(etiqueta)}</div>')
+    partes.append(f'<div class="cabecera-titulo">{html.escape(titulo)}</div>')
+    if detalle:
+        partes.append('<div class="cabecera-linea"></div>')
+        partes.append(f'<div class="cabecera-detalle">{detalle}</div>')
+    partes.append("</div></div>")
+    st.markdown("".join(partes), unsafe_allow_html=True)
+
+
+def aviso(titulo, texto):
+    st.markdown(
+        f'<div class="aviso"><div class="aviso-titulo">{html.escape(titulo)}</div>'
+        f"<div>{html.escape(texto)}</div></div>",
+        unsafe_allow_html=True,
+    )
 
 
 # ---------------------------------------------------------------- Google Sheets
@@ -37,9 +111,12 @@ def hoja(nombre):
     try:
         return libro.worksheet(nombre)
     except gspread.exceptions.WorksheetNotFound:
-        ws = libro.add_worksheet(title=nombre, rows=1000, cols=len(COLUMNAS[nombre]))
-        ws.append_row(COLUMNAS[nombre])
-        return ws
+        try:
+            ws = libro.add_worksheet(title=nombre, rows=1000, cols=len(COLUMNAS[nombre]))
+            ws.append_row(COLUMNAS[nombre])
+            return ws
+        except gspread.exceptions.APIError:
+            return libro.worksheet(nombre)
 
 
 @st.cache_data(ttl=60)
@@ -67,30 +144,33 @@ def pagina_encuesta(id_txt):
     encuestas = leer("encuestas")
     fila = encuestas[encuestas["id"].astype(str) == str(id_txt)]
     if fila.empty:
+        encabezado("Oportunidad de formación", TITULO)
         st.error("Esta encuesta no existe. Verifica el enlace.")
         return
     e = fila.iloc[0]
     tipo = e["tipo"]
     facilitadores = json.loads(e["facilitadores"])
 
-    st.title(TITULO)
-    st.subheader(str(e["evento"]).upper())
-    st.write(f"**{e['director_genero']}:** {e['director']}  \n{e['fechas']}")
-    st.divider()
+    detalle = (
+        f"{html.escape(str(e['director_genero']))}: <b>{html.escape(str(e['director']))}</b>"
+        f"<br>{html.escape(str(e['fechas']))}"
+    )
+    encabezado(TITULO, str(e["evento"]).upper(), detalle)
 
     if str(e["activa"]).upper() != "SI":
-        st.info("Esta encuesta ya está cerrada. ¡Gracias por tu interés!")
+        aviso("Encuesta cerrada", "Esta evaluación ya no recibe respuestas. ¡Gracias por tu interés!")
         return
     if st.session_state.get(f"enviada_{id_txt}"):
-        st.success("¡Gracias! Tu evaluación fue registrada.")
+        aviso("¡Gracias!", "Tu evaluación fue registrada. Siempre listos para servir.")
         return
 
     with st.form("encuesta"):
         nombre = st.text_input("Nombre y Apellido *")
         impacto = st.text_area(f"¿Qué fue lo que más te impactó del contenido del {tipo}? *")
         st.markdown(
-            "***Haga uso de la escala de estimación abajo indicada***  \n"
-            "**(Excelente = 5 / Bueno = 4 / Satisfactorio = 3 / Regular = 2 / Deficiente = 1)**"
+            '<div class="escala"><b>Haga uso de la escala de estimación abajo indicada</b><br>'
+            "Excelente = 5 · Bueno = 4 · Satisfactorio = 3 · Regular = 2 · Deficiente = 1</div>",
+            unsafe_allow_html=True,
         )
         p_director = st.radio(
             f"¿Cómo fue el desempeño {texto_director(e)}? *", ESCALA, index=None
@@ -106,7 +186,7 @@ def pagina_encuesta(id_txt):
             f"¿Cómo le pareció el ambiente que predominó en el {tipo}? *", ESCALA, index=None
         )
         comentario = st.text_area("Comentario u Observaciones finales")
-        enviar = st.form_submit_button("Enviar", type="primary")
+        enviar = st.form_submit_button("Enviar evaluación", type="primary")
 
     if enviar:
         escalas = [p_director, p_admin, p_ambiente, *p_facilitadores.values()]
@@ -167,6 +247,8 @@ def generar_excel(e, respuestas):
         })
     resumen = pd.DataFrame(resumen)
 
+    morado = PatternFill("solid", fgColor="622599")
+    blanco = Font(bold=True, color="FFFFFF")
     archivo = BytesIO()
     with pd.ExcelWriter(archivo, engine="openpyxl") as w:
         resumen.to_excel(w, sheet_name="Resumen", index=False, startrow=5)
@@ -177,6 +259,11 @@ def generar_excel(e, respuestas):
         h["A3"] = f"{e['director_genero']}: {e['director']}"
         h["A4"] = str(e["fechas"])
         h["A5"] = f"Total de respuestas: {len(detalle)}"
+        h["A1"].font = Font(bold=True, size=14, color="622599")
+        h["A2"].font = Font(bold=True, size=12)
+        for celda in list(h[6]) + list(w.sheets["Respuestas"][1]):
+            celda.fill = morado
+            celda.font = blanco
         for ws in w.sheets.values():
             for columna in ws.columns:
                 ws.column_dimensions[columna[0].column_letter].width = 30
@@ -187,7 +274,6 @@ def generar_excel(e, respuestas):
 def acceso_admin():
     if st.session_state.get("admin"):
         return True
-    st.title("Administración de encuestas")
     clave = st.text_input("Clave de administrador", type="password")
     if st.button("Entrar", type="primary"):
         if hmac.compare_digest(clave, st.secrets["admin_password"]):
@@ -235,7 +321,8 @@ def nueva_encuesta():
             fechas.strip(), json.dumps(facilitadores, ensure_ascii=False), "SI", ahora(),
         ])
         leer.clear()
-        st.success(f"Encuesta creada. Enlace para los participantes: {enlace(nuevo_id)}")
+        st.success("Encuesta creada. Este es el enlace para los participantes:")
+        st.code(enlace(nuevo_id), language=None)
 
 
 def lista_encuestas():
@@ -255,7 +342,8 @@ def lista_encuestas():
     respuestas = respuestas[respuestas["id_encuesta"].astype(str) == str(e["id"])]
     activa = str(e["activa"]).upper() == "SI"
 
-    st.write(f"**Enlace:** {enlace(e['id'])}")
+    st.caption("Enlace para los participantes")
+    st.code(enlace(e["id"]), language=None)
     c1, c2 = st.columns(2)
     c1.metric("Respuestas", len(respuestas))
     c2.metric("Estado", "Abierta" if activa else "Cerrada")
@@ -276,9 +364,9 @@ def lista_encuestas():
 
 
 def pagina_admin():
+    encabezado("Oportunidades de formación", "Administración de encuestas")
     if not acceso_admin():
         return
-    st.title("Administración de encuestas")
     t1, t2 = st.tabs(["Encuestas y reportes", "Nueva encuesta"])
     with t1:
         lista_encuestas()
@@ -287,6 +375,7 @@ def pagina_admin():
 
 
 # ---------------------------------------------------------------- Inicio
+st.markdown(CSS, unsafe_allow_html=True)
 id_encuesta = st.query_params.get("encuesta")
 if id_encuesta:
     pagina_encuesta(id_encuesta)
