@@ -2,7 +2,7 @@ import base64
 import hmac
 import html
 import json
-from datetime import datetime
+from datetime import datetime, time
 from io import BytesIO
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -24,9 +24,10 @@ st.set_page_config(
 ZONA = ZoneInfo("America/Caracas")
 TITULO = "Evaluación de la Oportunidad de Formación"
 ESCALA = ["5 Excelente", "4 Bueno", "3 Satisfactorio", "2 Regular", "1 Deficiente"]
+FORMATO_FECHA = "%d/%m/%Y %H:%M"
 COLUMNAS = {
     "encuestas": ["id", "tipo", "evento", "director_genero", "director",
-                  "fechas", "facilitadores", "activa", "creada"],
+                  "fechas", "facilitadores", "activa", "creada", "apertura"],
     "respuestas": ["id_encuesta", "fecha_hora", "nombre", "impacto", "director",
                    "facilitadores", "administrador", "ambiente", "comentario"],
 }
@@ -113,7 +114,7 @@ def abrir_libro():
     return cliente.open_by_key(st.secrets["sheet_id"])
 
 
-def hoja(nombre):
+def abrir_hoja(nombre):
     libro = abrir_libro()
     try:
         return libro.worksheet(nombre)
@@ -126,6 +127,25 @@ def hoja(nombre):
             return libro.worksheet(nombre)
 
 
+@st.cache_resource
+def preparar_hoja(nombre):
+    """Revisa una sola vez que la pestaña tenga todas las columnas necesarias."""
+    ws = abrir_hoja(nombre)
+    esperadas = COLUMNAS[nombre]
+    actuales = ws.row_values(1)
+    if ws.col_count < len(esperadas):
+        ws.add_cols(len(esperadas) - ws.col_count)
+    for n, columna in enumerate(esperadas, start=1):
+        if n > len(actuales) or actuales[n - 1] != columna:
+            ws.update_cell(1, n, columna)
+    return True
+
+
+def hoja(nombre):
+    preparar_hoja(nombre)
+    return abrir_hoja(nombre)
+
+
 @st.cache_data(ttl=60)
 def leer(nombre):
     registros = hoja(nombre).get_all_records()
@@ -133,7 +153,7 @@ def leer(nombre):
 
 
 def ahora():
-    return datetime.now(ZONA).strftime("%d/%m/%Y %H:%M")
+    return datetime.now(ZONA)
 
 
 def buscar_encuesta(id_txt):
@@ -147,14 +167,16 @@ def respuestas_de(e):
     return respuestas[respuestas["id_encuesta"].astype(str) == str(e["id"])]
 
 
-def borrar_filas(nombre, id_encuesta):
-    """Borra de una pestaña todas las filas cuya primera columna sea el id indicado."""
-    ws = hoja(nombre)
+def filas_con_id(ws, id_encuesta):
     ids = ws.col_values(1)
-    filas = [n for n, v in enumerate(ids, start=1)
-             if n > 1 and str(v).strip() == str(id_encuesta)]
+    return [n for n, v in enumerate(ids, start=1)
+            if n > 1 and str(v).strip() == str(id_encuesta)]
+
+
+def borrar_filas(nombre, id_encuesta):
+    ws = hoja(nombre)
     bloques = []
-    for n in filas:
+    for n in filas_con_id(ws, id_encuesta):
         if bloques and n == bloques[-1][1] + 1:
             bloques[-1][1] = n
         else:
@@ -167,6 +189,46 @@ def eliminar_encuesta(id_encuesta):
     borrar_filas("respuestas", id_encuesta)
     borrar_filas("encuestas", id_encuesta)
     leer.clear()
+
+
+def guardar_estado(id_encuesta, activa, apertura=None):
+    ws = hoja("encuestas")
+    filas = filas_con_id(ws, id_encuesta)
+    if not filas:
+        return
+    fila = filas[0]
+    ws.update_cell(fila, COLUMNAS["encuestas"].index("activa") + 1, activa)
+    if apertura is not None:
+        columna = COLUMNAS["encuestas"].index("apertura") + 1
+        celda = gspread.utils.rowcol_to_a1(fila, columna)
+        ws.update(values=[[apertura]], range_name=celda, value_input_option="RAW")
+    leer.clear()
+
+
+# ---------------------------------------------------------------- Estado y apertura
+def leer_apertura(e):
+    texto = str(e.get("apertura", "") or "").strip()
+    for formato in (FORMATO_FECHA, "%d/%m/%Y %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(texto, formato).replace(tzinfo=ZONA)
+        except ValueError:
+            continue
+    return None
+
+
+def estado(e):
+    valor = str(e["activa"]).strip().upper()
+    if valor == "SI":
+        return "Abierta"
+    if valor == "PROGRAMADA":
+        apertura = leer_apertura(e)
+        if apertura is not None:
+            return "Abierta" if ahora() >= apertura else "Programada"
+    return "Cerrada"
+
+
+def texto_apertura(apertura):
+    return f"{apertura:%d/%m/%Y} a las {apertura:%I:%M %p} (hora de Venezuela)"
 
 
 # ---------------------------------------------------------------- Textos y enlaces
@@ -207,8 +269,15 @@ def pagina_encuesta(id_txt):
     facilitadores = json.loads(e["facilitadores"])
     encabezado(TITULO, str(e["evento"]).upper(), detalle_evento(e))
 
-    if str(e["activa"]).upper() != "SI":
-        aviso("Encuesta cerrada", "Esta evaluación ya no recibe respuestas. ¡Gracias por tu interés!")
+    situacion = estado(e)
+    if situacion == "Programada":
+        aviso(
+            "Encuesta aún no disponible",
+            f"Se abrirá el {texto_apertura(leer_apertura(e))}. Vuelve a este enlace en ese momento.",
+        )
+        return
+    if situacion == "Cerrada":
+        aviso("Encuesta cerrada", "Esta evaluación no está recibiendo respuestas en este momento.")
         return
     if st.session_state.get(f"enviada_{id_txt}"):
         aviso("¡Gracias!", "Tu evaluación fue registrada. Siempre listos para servir.")
@@ -245,7 +314,7 @@ def pagina_encuesta(id_txt):
             return
         notas = {n: int(v[0]) for n, v in p_facilitadores.items()}
         hoja("respuestas").append_row([
-            int(e["id"]), ahora(), nombre.strip(), impacto.strip(),
+            int(e["id"]), ahora().strftime(FORMATO_FECHA), nombre.strip(), impacto.strip(),
             int(p_director[0]), json.dumps(notas, ensure_ascii=False),
             int(p_admin[0]), int(p_ambiente[0]), comentario.strip(),
         ])
@@ -343,11 +412,10 @@ def pagina_reporte(id_txt, clave):
     if st.button("Actualizar datos"):
         leer.clear()
     respuestas = respuestas_de(e)
-    activa = str(e["activa"]).upper() == "SI"
 
     c1, c2 = st.columns(2)
     c1.metric("Respuestas recibidas", len(respuestas))
-    c2.metric("Estado de la encuesta", "Abierta" if activa else "Cerrada")
+    c2.metric("Estado de la encuesta", estado(e))
     boton_descarga(e, respuestas)
     st.caption("El reporte se genera con las respuestas recibidas hasta este momento.")
 
@@ -395,10 +463,14 @@ def nueva_encuesta():
         nuevo_id = 1 if encuestas.empty else int(pd.to_numeric(encuestas["id"]).max()) + 1
         hoja("encuestas").append_row([
             nuevo_id, tipo, evento.strip(), director_genero, director.strip(),
-            fechas.strip(), json.dumps(facilitadores, ensure_ascii=False), "SI", ahora(),
+            fechas.strip(), json.dumps(facilitadores, ensure_ascii=False), "NO",
+            ahora().strftime(FORMATO_FECHA), "",
         ])
         leer.clear()
-        st.success("Encuesta creada.")
+        st.success(
+            "Encuesta creada. Está cerrada: ábrela o programa su apertura en la "
+            "pestaña «Encuestas y reportes»."
+        )
         st.caption("Enlace para los participantes")
         st.code(enlace(nuevo_id), language=None)
         st.caption("Enlace del reporte para el Director o Directora")
@@ -415,11 +487,11 @@ def lista_encuestas():
     encuestas = encuestas.iloc[::-1]
     opciones = {f"{r['id']} · {r['evento']} ({r['fechas']})": i for i, r in encuestas.iterrows()}
     elegida = st.selectbox("Encuesta", list(opciones))
-    indice = opciones[elegida]
-    e = encuestas.loc[indice]
+    e = encuestas.loc[opciones[elegida]]
 
     respuestas = respuestas_de(e)
-    activa = str(e["activa"]).upper() == "SI"
+    situacion = estado(e)
+    apertura = leer_apertura(e)
 
     st.caption("Enlace para los participantes")
     st.code(enlace(e["id"]), language=None)
@@ -428,16 +500,39 @@ def lista_encuestas():
 
     c1, c2 = st.columns(2)
     c1.metric("Respuestas", len(respuestas))
-    c2.metric("Estado", "Abierta" if activa else "Cerrada")
+    c2.metric("Estado", situacion)
+    if situacion == "Programada":
+        st.info(f"Apertura programada para el {texto_apertura(apertura)}.")
 
     c1, c2 = st.columns(2)
     with c1:
         boton_descarga(e, respuestas)
-    if c2.button("Cerrar encuesta" if activa else "Reabrir encuesta"):
-        columna = COLUMNAS["encuestas"].index("activa") + 1
-        hoja("encuestas").update_cell(int(indice) + 2, columna, "NO" if activa else "SI")
-        leer.clear()
-        st.rerun()
+    if situacion == "Cerrada":
+        if c2.button("Abrir ahora", key=f"abrir_{e['id']}"):
+            guardar_estado(e["id"], "SI")
+            st.rerun()
+    else:
+        etiqueta = "Cerrar encuesta" if situacion == "Abierta" else "Cancelar apertura programada"
+        if c2.button(etiqueta, key=f"cerrar_{e['id']}"):
+            guardar_estado(e["id"], "NO")
+            st.rerun()
+
+    with st.expander("Programar apertura"):
+        with st.form(f"programar_{e['id']}"):
+            base = apertura or ahora()
+            c1, c2 = st.columns(2)
+            dia = c1.date_input("Día", value=base.date(), format="DD/MM/YYYY")
+            hora = c2.time_input(
+                "Hora (Venezuela)", value=apertura.time() if apertura else time(8, 0), step=900
+            )
+            if st.form_submit_button("Programar apertura"):
+                momento = datetime.combine(dia, hora)
+                guardar_estado(e["id"], "PROGRAMADA", momento.strftime(FORMATO_FECHA))
+                st.rerun()
+        st.caption(
+            "La encuesta se abrirá sola en ese momento. Si eliges una fecha que ya pasó, "
+            "se abre de inmediato."
+        )
 
     with st.expander("Eliminar esta encuesta"):
         st.warning(
