@@ -147,6 +147,28 @@ def respuestas_de(e):
     return respuestas[respuestas["id_encuesta"].astype(str) == str(e["id"])]
 
 
+def borrar_filas(nombre, id_encuesta):
+    """Borra de una pestaña todas las filas cuya primera columna sea el id indicado."""
+    ws = hoja(nombre)
+    ids = ws.col_values(1)
+    filas = [n for n, v in enumerate(ids, start=1)
+             if n > 1 and str(v).strip() == str(id_encuesta)]
+    bloques = []
+    for n in filas:
+        if bloques and n == bloques[-1][1] + 1:
+            bloques[-1][1] = n
+        else:
+            bloques.append([n, n])
+    for inicio, fin in reversed(bloques):
+        ws.delete_rows(inicio, fin)
+
+
+def eliminar_encuesta(id_encuesta):
+    borrar_filas("respuestas", id_encuesta)
+    borrar_filas("encuestas", id_encuesta)
+    leer.clear()
+
+
 # ---------------------------------------------------------------- Textos y enlaces
 def texto_director(e):
     return "de la Directora" if e["director_genero"] == "Directora" else "del Director"
@@ -416,6 +438,19 @@ def lista_encuestas():
         hoja("encuestas").update_cell(int(indice) + 2, columna, "NO" if activa else "SI")
         leer.clear()
         st.rerun()
+
+    with st.expander("Eliminar esta encuesta"):
+        st.warning(
+            f"Se borrará la encuesta «{e['evento']}» junto con sus {len(respuestas)} "
+            "respuesta(s). Esta acción no se puede deshacer. Si quieres conservar los "
+            "datos, descarga primero el reporte en Excel."
+        )
+        confirmar = st.checkbox(
+            "Sí, quiero eliminarla definitivamente", key=f"confirmar_{e['id']}"
+        )
+        if st.button("Eliminar encuesta", disabled=not confirmar, key=f"eliminar_{e['id']}"):
+            eliminar_encuesta(e["id"])
+            st.rerun()
 
 
 def pagina_admin():
