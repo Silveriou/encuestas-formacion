@@ -99,6 +99,13 @@ def aviso(titulo, texto):
     )
 
 
+def detalle_evento(e):
+    return (
+        f"{html.escape(str(e['director_genero']))}: <b>{html.escape(str(e['director']))}</b>"
+        f"<br>{html.escape(str(e['fechas']))}"
+    )
+
+
 # ---------------------------------------------------------------- Google Sheets
 @st.cache_resource
 def abrir_libro():
@@ -129,7 +136,18 @@ def ahora():
     return datetime.now(ZONA).strftime("%d/%m/%Y %H:%M")
 
 
-# ---------------------------------------------------------------- Textos
+def buscar_encuesta(id_txt):
+    encuestas = leer("encuestas")
+    fila = encuestas[encuestas["id"].astype(str) == str(id_txt)]
+    return None if fila.empty else fila.iloc[0]
+
+
+def respuestas_de(e):
+    respuestas = leer("respuestas")
+    return respuestas[respuestas["id_encuesta"].astype(str) == str(e["id"])]
+
+
+# ---------------------------------------------------------------- Textos y enlaces
 def texto_director(e):
     return "de la Directora" if e["director_genero"] == "Directora" else "del Director"
 
@@ -139,23 +157,33 @@ def texto_facilitador(f):
     return f"{articulo} {f['nombre']}"
 
 
+def direccion_app():
+    return st.secrets.get("app_url", "").rstrip("/")
+
+
+def enlace(id_encuesta):
+    return f"{direccion_app()}/?encuesta={id_encuesta}"
+
+
+def clave_reporte(id_encuesta):
+    secreto = st.secrets["admin_password"].encode()
+    return hmac.new(secreto, f"reporte-{id_encuesta}".encode(), "sha256").hexdigest()[:20]
+
+
+def enlace_reporte(id_encuesta):
+    return f"{direccion_app()}/?reporte={id_encuesta}&clave={clave_reporte(id_encuesta)}"
+
+
 # ---------------------------------------------------------------- Encuesta pública
 def pagina_encuesta(id_txt):
-    encuestas = leer("encuestas")
-    fila = encuestas[encuestas["id"].astype(str) == str(id_txt)]
-    if fila.empty:
+    e = buscar_encuesta(id_txt)
+    if e is None:
         encabezado("Oportunidad de formación", TITULO)
         st.error("Esta encuesta no existe. Verifica el enlace.")
         return
-    e = fila.iloc[0]
     tipo = e["tipo"]
     facilitadores = json.loads(e["facilitadores"])
-
-    detalle = (
-        f"{html.escape(str(e['director_genero']))}: <b>{html.escape(str(e['director']))}</b>"
-        f"<br>{html.escape(str(e['fechas']))}"
-    )
-    encabezado(TITULO, str(e["evento"]).upper(), detalle)
+    encabezado(TITULO, str(e["evento"]).upper(), detalle_evento(e))
 
     if str(e["activa"]).upper() != "SI":
         aviso("Encuesta cerrada", "Esta evaluación ya no recibe respuestas. ¡Gracias por tu interés!")
@@ -270,23 +298,50 @@ def generar_excel(e, respuestas):
     return archivo.getvalue()
 
 
+def boton_descarga(e, respuestas):
+    st.download_button(
+        "Descargar reporte en Excel",
+        data=generar_excel(e, respuestas),
+        file_name=f"Evaluacion_{e['id']}_{str(e['evento']).replace(' ', '_')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        type="primary",
+    )
+
+
+# ---------------------------------------------------------------- Reporte para el Director
+def pagina_reporte(id_txt, clave):
+    e = buscar_encuesta(id_txt)
+    valida = hmac.compare_digest(str(clave or "").encode(), clave_reporte(id_txt).encode())
+    if e is None or not valida:
+        encabezado("Oportunidad de formación", "Reporte de evaluación")
+        st.error("Este enlace no es válido. Solicita uno nuevo al administrador.")
+        return
+    encabezado("Reporte de evaluación", str(e["evento"]).upper(), detalle_evento(e))
+
+    if st.button("Actualizar datos"):
+        leer.clear()
+    respuestas = respuestas_de(e)
+    activa = str(e["activa"]).upper() == "SI"
+
+    c1, c2 = st.columns(2)
+    c1.metric("Respuestas recibidas", len(respuestas))
+    c2.metric("Estado de la encuesta", "Abierta" if activa else "Cerrada")
+    boton_descarga(e, respuestas)
+    st.caption("El reporte se genera con las respuestas recibidas hasta este momento.")
+
+
 # ---------------------------------------------------------------- Administración
 def acceso_admin():
     if st.session_state.get("admin"):
         return True
     clave = st.text_input("Clave de administrador", type="password")
     if st.button("Entrar", type="primary"):
-        if hmac.compare_digest(clave, st.secrets["admin_password"]):
+        if hmac.compare_digest(clave.encode(), st.secrets["admin_password"].encode()):
             st.session_state["admin"] = True
             st.rerun()
         else:
             st.error("Clave incorrecta.")
     return False
-
-
-def enlace(id_encuesta):
-    base = st.secrets.get("app_url", "").rstrip("/")
-    return f"{base}/?encuesta={id_encuesta}"
 
 
 def nueva_encuesta():
@@ -321,8 +376,11 @@ def nueva_encuesta():
             fechas.strip(), json.dumps(facilitadores, ensure_ascii=False), "SI", ahora(),
         ])
         leer.clear()
-        st.success("Encuesta creada. Este es el enlace para los participantes:")
+        st.success("Encuesta creada.")
+        st.caption("Enlace para los participantes")
         st.code(enlace(nuevo_id), language=None)
+        st.caption("Enlace del reporte para el Director o Directora")
+        st.code(enlace_reporte(nuevo_id), language=None)
 
 
 def lista_encuestas():
@@ -338,24 +396,21 @@ def lista_encuestas():
     indice = opciones[elegida]
     e = encuestas.loc[indice]
 
-    respuestas = leer("respuestas")
-    respuestas = respuestas[respuestas["id_encuesta"].astype(str) == str(e["id"])]
+    respuestas = respuestas_de(e)
     activa = str(e["activa"]).upper() == "SI"
 
     st.caption("Enlace para los participantes")
     st.code(enlace(e["id"]), language=None)
+    st.caption("Enlace del reporte para el Director o Directora")
+    st.code(enlace_reporte(e["id"]), language=None)
+
     c1, c2 = st.columns(2)
     c1.metric("Respuestas", len(respuestas))
     c2.metric("Estado", "Abierta" if activa else "Cerrada")
 
     c1, c2 = st.columns(2)
-    c1.download_button(
-        "Descargar reporte en Excel",
-        data=generar_excel(e, respuestas),
-        file_name=f"Evaluacion_{e['id']}_{str(e['evento']).replace(' ', '_')}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        type="primary",
-    )
+    with c1:
+        boton_descarga(e, respuestas)
     if c2.button("Cerrar encuesta" if activa else "Reabrir encuesta"):
         columna = COLUMNAS["encuestas"].index("activa") + 1
         hoja("encuestas").update_cell(int(indice) + 2, columna, "NO" if activa else "SI")
@@ -377,7 +432,10 @@ def pagina_admin():
 # ---------------------------------------------------------------- Inicio
 st.markdown(CSS, unsafe_allow_html=True)
 id_encuesta = st.query_params.get("encuesta")
+id_reporte = st.query_params.get("reporte")
 if id_encuesta:
     pagina_encuesta(id_encuesta)
+elif id_reporte:
+    pagina_reporte(id_reporte, st.query_params.get("clave"))
 else:
     pagina_admin()
