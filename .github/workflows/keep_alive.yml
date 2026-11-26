@@ -2,8 +2,8 @@ name: Mantener app despierta
 
 on:
   schedule:
-    - cron: "0 */6 * * *"   # cada 6 horas
-  workflow_dispatch:         # permite ejecutarlo a mano
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
 
 jobs:
   ping:
@@ -20,7 +20,7 @@ jobs:
 
       - name: Abrir la app como un visitante real
         env:
-          APP_URL: https://encuestas-formacion.streamlit.app/
+          APP_URL: https://TU-APP.streamlit.app
         run: |
           python - <<'EOF'
           import os
@@ -31,14 +31,18 @@ jobs:
               b = p.chromium.launch()
               page = b.new_page()
               page.goto(url, timeout=90000)
+              page.wait_for_timeout(10000)
 
               # Si la app estaba dormida, la despierta
               boton = page.get_by_text("Yes, get this app back up!")
               if boton.count() > 0:
+                  print("La app estaba dormida, despertando...")
                   boton.first.click()
+                  page.wait_for_timeout(20000)
 
-              # Confirma que la app realmente cargó (falla en rojo si no)
-              page.get_by_text("Administración de Encuestas").wait_for(timeout=120000)
+              # La app vive dentro de un iframe
+              app = page.frame_locator('iframe[title="streamlitApp"]')
+              app.get_by_text("Administración de Encuestas").wait_for(timeout=120000)
               print("App activa")
               b.close()
           EOF
