@@ -20,7 +20,7 @@ jobs:
 
       - name: Abrir la app como un visitante real
         env:
-          APP_URL: https://TU-APP.streamlit.app
+          APP_URL: https://encuestas-formacion.streamlit.app/
         run: |
           python - <<'EOF'
           import os
